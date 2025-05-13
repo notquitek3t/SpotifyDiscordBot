@@ -158,6 +158,24 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
+async def monitor_playback_and_disconnect(vc: discord.VoiceClient, check_interval: int = 10):
+    """
+    Periodically checks if Spotify is playing. If not, disconnects the bot from the voice channel.
+    """
+    while vc.is_connected():
+        await asyncio.sleep(check_interval)
+        try:
+            playback = sp.current_playback()
+            if not playback or not playback.get('is_playing'):
+                print("Spotify is not playing. Disconnecting from voice channel.")
+                if vc.source:
+                    vc.source.cleanup()
+                await vc.disconnect()
+                break
+        except Exception as e:
+            print(f"Error in playback monitor: {e}")
+            break
+
 
 @tree.command(name="join", description="Join your voice channel and stream Spotify audio", )
 async def join(interaction: discord.Interaction):
@@ -174,13 +192,15 @@ async def join(interaction: discord.Interaction):
     source = discord.FFmpegPCMAudio(
         librespot,
         pipe=True,
-        before_options='-f s16le -ar 48000 -ac 2',  # 176400 = 44100 * 2 * 2 (1 second of s16 stereo at 44.1kHz)
-        options='-vn -vbr 0'
+        before_options='-rtbufsize 150000 -f s16le -ar 48000 -ac 2',  # 176400 = 44100 * 2 * 2 (1 second of s16 stereo at 44.1kHz)
+        options='-vn -vbr 0 -bufsize 150000'
     )
     #source = discord.PCMAudio(
     #    librespot
     #)
     vc.play(source)
+    asyncio.create_task(monitor_playback_and_disconnect(vc))
+
     
     await interaction.response.send_message("Joined the channel and started Spotify streaming. Use /play to start playing music!")
     loopthingy = 0
@@ -191,8 +211,8 @@ async def join(interaction: discord.Interaction):
             if d['name'] == "Discord Bot":
                 try:
                     sp.transfer_playback(device_id=d['id'], force_play=False)
-                    sp.start_playback(uris=[])
                     loopthingy = 1
+                    await asyncio.sleep(3)
                 except Exception as e:
                     print(e)
                     pass
@@ -230,16 +250,50 @@ async def is_spotify_playing():
     play_type="Type of content to play"
 )
 async def play(interaction: discord.Interaction, query: str, play_type: str = "track"):
-    if not sp:
-        await interaction.response.send_message("Spotify is not authenticated. Please check the console for setup instructions.", ephemeral=True)
-        return
+    if not interaction.guild.voice_client:
+        if not interaction.user.voice:
+            await interaction.response.send_message("You're not in a voice channel!", ephemeral=True)
+            return
+
+        channel = interaction.user.voice.channel
+        vc = await channel.connect()
+
+        librespot = LibrespotAudio()
+        await librespot.start()
+        # the other audio handler, might work better? idfk tho
+        #source = discord.FFmpegPCMAudio(
+        #    librespot,
+        #    pipe=True,
+        #    before_options='-rtbufsize 150000 -f s16le -ar 48000 -ac 2',  # 176400 = 44100 * 2 * 2 (1 second of s16 stereo at 44.1kHz)
+        #    options='-vn -vbr 0 -bufsize 150000'
+        #)
+        source = discord.PCMAudio(
+            librespot
+        )
+        vc.play(source)
+        asyncio.create_task(monitor_playback_and_disconnect(vc))
+
+        await interaction.response.send_message("Joined the channel, trying to start playback...")
+        loopthingy = 0
+        while loopthingy == 0:
+            devices = sp.devices()
+            for d in devices['devices']:
+                print(f"{d['name']}: {d['id']}")
+                if d['name'] == "Discord Bot":
+                    try:
+                        sp.transfer_playback(device_id=d['id'], force_play=False)
+                        loopthingy = 1
+                        await asyncio.sleep(2)
+                    except Exception as e:
+                        print(e)
+                        pass
 
     try:
         if play_type.lower() == "album":
             # Search for album
             results = sp.search(query, limit=1, type='album')
             if not results['albums']['items']:
-                await interaction.response.send_message("No albums found!", ephemeral=True)
+                await interaction.response.edit_message("No albums found!")
                 return
 
             album = results['albums']['items'][0]
@@ -250,32 +304,32 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
             track_uris = [track['uri'] for track in album_tracks['items']]
             
             if not track_uris:
-                await interaction.response.send_message("No tracks found in album!", ephemeral=True)
+                await interaction.response.edit_message("No tracks found in album!")
                 return
 
             if await is_spotify_playing():
                 # Add all tracks to queue
                 for uri in track_uris:
                     sp.add_to_queue(uri)
-                await interaction.response.send_message(
+                await interaction.response.edit_message(
                     f"Added album to queue: {album['name']} by {album['artists'][0]['name']}\n"
-                    f"({len(track_uris)} tracks)", ephemeral=True
+                    f"({len(track_uris)} tracks)"
                 )
             else:
                 # Start playback with first track and queue the rest
                 sp.start_playback(uris=[track_uris[0]])
                 for uri in track_uris[1:]:
                     sp.add_to_queue(uri)
-                await interaction.response.send_message(
+                await interaction.response.edit_message(
                     f"Now playing album: {album['name']} by {album['artists'][0]['name']}\n"
-                    f"({len(track_uris)} tracks)", ephemeral=True
+                    f"({len(track_uris)} tracks)"
                 )
 
         else:  # Default to track
             # Search for the track
             results = sp.search(query, limit=1, type='track')
             if not results['tracks']['items']:
-                await interaction.response.send_message("No tracks found!", ephemeral=True)
+                await interaction.response.edit_message("No tracks found!")
                 return
 
             track = results['tracks']['items'][0]
@@ -286,41 +340,67 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
             if await is_spotify_playing():
                 # Add to queue
                 sp.add_to_queue(track_uri)
-                await interaction.response.send_message(f"Added to queue: {track_name} by {artist_name}", ephemeral=True)
+                await interaction.response.edit_message(f"Added to queue: {track_name} by {artist_name}")
             else:
                 # Start playback
                 sp.start_playback(uris=[track_uri])
-                await interaction.response.send_message(f"Now playing: {track_name} by {artist_name}", ephemeral=True)
+                await interaction.response.edit_message(f"Now playing: {track_name} by {artist_name}")
 
     except Exception as e:
-        await interaction.response.send_message(f"Error playing or queuing: {str(e)}", ephemeral=True)
+        print(e)
+        await interaction.response.edit_message(f"Error playing or queuing: {str(e)}")
 
 
 @tree.command(name="pause", description="Pause Spotify playback", )
 async def pause(interaction: discord.Interaction):
-    if not sp:
-        await interaction.response.send_message("Spotify is not authenticated. Please check the console for setup instructions.", ephemeral=True)
-        return
-
-    try:
-        sp.pause_playback()
-        await interaction.response.send_message("Playback paused")
-    except Exception as e:
-        await interaction.response.send_message(f"Error pausing playback: {str(e)}", ephemeral=True)
+    if interaction.guild.voice_client:
+        # Clean up librespot process
+        if interaction.guild.voice_client.source:
+            interaction.guild.voice_client.source.cleanup()
+        await interaction.guild.voice_client.disconnect()
+        await interaction.response.send_message("Paused, use /resume to start again.", ephemeral=True)
+    else:
+        await interaction.response.send_message("I'm not in a voice channel.", ephemeral=True)
 
 
 @tree.command(name="resume", description="Resume Spotify playback", )
 async def resume(interaction: discord.Interaction):
-    if not sp:
-        await interaction.response.send_message("Spotify is not authenticated. Please check the console for setup instructions.", ephemeral=True)
+    if not interaction.user.voice:
+        await interaction.response.send_message("You're not in a voice channel!", ephemeral=True)
         return
 
-    try:
-        sp.start_playback()
-        await interaction.response.send_message("Playback resumed")
-    except Exception as e:
-        await interaction.response.send_message(f"Error resuming playback: {str(e)}", ephemeral=True)
+    channel = interaction.user.voice.channel
+    vc = await channel.connect()
 
+    librespot = LibrespotAudio()
+    await librespot.start()
+    # the other audio handler, might work better? idfk tho
+    source = discord.FFmpegPCMAudio(
+        librespot,
+        pipe=True,
+        before_options='-rtbufsize 150000 -f s16le -ar 48000 -ac 2',  # 176400 = 44100 * 2 * 2 (1 second of s16 stereo at 44.1kHz)
+        options='-vn -vbr 0 -bufsize 150000'
+    )
+    #source = discord.PCMAudio(
+    #    librespot
+    #)
+    vc.play(source)
+    asyncio.create_task(monitor_playback_and_disconnect(vc))
+    
+    await interaction.response.send_message("Joined the channel, trying to resume playback...")
+    loopthingy = 0
+    while loopthingy == 0:
+        devices = sp.devices()
+        for d in devices['devices']:
+            print(f"{d['name']}: {d['id']}")
+            if d['name'] == "Discord Bot":
+                try:
+                    sp.transfer_playback(device_id=d['id'], force_play=True)
+                    loopthingy = 1
+                    await asyncio.sleep(3)
+                except Exception as e:
+                    print(e)
+                    pass
 
 @tree.command(name="search", description="Search for a song on Spotify", )
 async def search(interaction: discord.Interaction, query: str):
