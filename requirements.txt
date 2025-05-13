@@ -1,0 +1,6 @@
+discord[voice]
+pynacl
+spotipy
+numpy
+scipy
+dotenv
