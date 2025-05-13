@@ -155,6 +155,10 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
+async def is_bot_in_any_voice_channel(bot: commands.Bot) -> bool:
+    return any(vc.is_connected() for vc in bot.voice_clients)
+
+
 async def monitor_playback_and_disconnect(vc: discord.VoiceClient, check_interval: int = 10):
     """
     Periodically checks if Spotify is playing. If not, disconnects the bot from the voice channel.
@@ -211,7 +215,10 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
         if not interaction.user.voice:
             await interaction.response.send_message("you're not in a voice channel", ephemeral=True)
             return
-        print(interaction.user.voice)
+    if not interaction.guild.voice_client:
+        if is_bot_in_any_voice_channel(bot):
+            await interaction.response.send_message("I'm already playing music in another server. I can't join multiple VCs.", ephemeral=True)
+            return
 
         channel = interaction.user.voice.channel
         vc = await channel.connect()
@@ -339,7 +346,11 @@ async def resume(interaction: discord.Interaction):
     if interaction.guild.voice_client:
         await interaction.response.send_message("brotha i'm in the vc already", ephemeral=True)
         return
-    
+    if not interaction.guild.voice_client:
+        if is_bot_in_any_voice_channel(bot):
+            await interaction.response.send_message("I'm already playing music in another server. I can't join multiple VCs.", ephemeral=True)
+            return
+
     channel = interaction.user.voice.channel
     vc = await channel.connect()
 
