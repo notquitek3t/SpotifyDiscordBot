@@ -216,7 +216,7 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
             await interaction.response.send_message("you're not in a voice channel", ephemeral=True)
             return
     if not interaction.guild.voice_client:
-        if is_bot_in_any_voice_channel(bot):
+        if await is_bot_in_any_voice_channel(bot):
             await interaction.response.send_message("I'm already playing music in another server. I can't join multiple VCs.", ephemeral=True)
             return
 
@@ -256,7 +256,7 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
         await interaction.response.send_message("you're in the wrong vc, or the bot is playing in another server.", ephemeral=True)
         return
     else:
-        await interaction.response.send_message("processing...")
+        await interaction.response.send_message("processing...", ephemeral=True)
     try:
         if play_type.lower() == "album":
             # Search for album
@@ -314,6 +314,7 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
                 # Start playback
                 sp.start_playback(uris=[track_uri])
                 await interaction.edit_original_response(content=f"started playing: {track_name} by {artist_name}")
+                sp.previous_track()
 
     except Exception as e:
         print(e)
@@ -347,7 +348,7 @@ async def resume(interaction: discord.Interaction):
         await interaction.response.send_message("brotha i'm in the vc already", ephemeral=True)
         return
     if not interaction.guild.voice_client:
-        if is_bot_in_any_voice_channel(bot):
+        if await is_bot_in_any_voice_channel(bot):
             await interaction.response.send_message("I'm already playing music in another server. I can't join multiple VCs.", ephemeral=True)
             return
 
