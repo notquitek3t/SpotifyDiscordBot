@@ -19,9 +19,6 @@ TOKEN = os.getenv("TOKEN")
 SPOTIFY_CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
 SPOTIFY_CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
 SPOTIFY_REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'http://localhost:8888/callback')
-SPOTIFY_USERNAME = os.getenv('SPOTIFY_USERNAME')
-SPOTIFY_PASSWORD = os.getenv('SPOTIFY_PASSWORD')
-
 # Initialize Spotify client with OAuth
 sp = None
 librespot_process = None
@@ -177,51 +174,11 @@ async def monitor_playback_and_disconnect(vc: discord.VoiceClient, check_interva
             break
 
 
-@tree.command(name="join", description="Join your voice channel and stream Spotify audio", )
-async def join(interaction: discord.Interaction):
-    if not interaction.user.voice:
-        await interaction.response.send_message("You're not in a voice channel!", ephemeral=True)
-        return
-
-    channel = interaction.user.voice.channel
-    vc = await channel.connect()
-
-    librespot = LibrespotAudio()
-    await librespot.start()
-    # the other audio handler, might work better? idfk tho
-    source = discord.FFmpegPCMAudio(
-        librespot,
-        pipe=True,
-        before_options='-rtbufsize 150000 -f s16le -ar 48000 -ac 2',  # 176400 = 44100 * 2 * 2 (1 second of s16 stereo at 44.1kHz)
-        options='-vn -vbr 0 -bufsize 150000'
-    )
-    #source = discord.PCMAudio(
-    #    librespot
-    #)
-    vc.play(source)
-    asyncio.create_task(monitor_playback_and_disconnect(vc))
-
-    
-    await interaction.response.send_message("Joined the channel and started Spotify streaming. Use /play to start playing music!")
-    loopthingy = 0
-    while loopthingy == 0:
-        devices = sp.devices()
-        for d in devices['devices']:
-            print(f"{d['name']}: {d['id']}")
-            if d['name'] == "Discord Bot":
-                try:
-                    sp.transfer_playback(device_id=d['id'], force_play=False)
-                    loopthingy = 1
-                    await asyncio.sleep(3)
-                except Exception as e:
-                    print(e)
-                    pass
-
-
-
-
 @tree.command(name="leave", description="Leave the voice channel", )
 async def leave(interaction: discord.Interaction):
+    if not interaction.user.voice:
+        await interaction.response.send_message("you're not in a voice channel", ephemeral=True)
+        return
     if interaction.guild.voice_client:
         # Clean up librespot process
         if interaction.guild.voice_client.source:
@@ -252,8 +209,9 @@ async def is_spotify_playing():
 async def play(interaction: discord.Interaction, query: str, play_type: str = "track"):
     if not interaction.guild.voice_client:
         if not interaction.user.voice:
-            await interaction.response.send_message("You're not in a voice channel!", ephemeral=True)
+            await interaction.response.send_message("you're not in a voice channel", ephemeral=True)
             return
+        print(interaction.user.voice)
 
         channel = interaction.user.voice.channel
         vc = await channel.connect()
@@ -273,7 +231,7 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
         vc.play(source)
         asyncio.create_task(monitor_playback_and_disconnect(vc))
 
-        await interaction.response.send_message("Joined the channel, trying to start playback...")
+        await interaction.response.send_message("joined the vc, trying to tell spotify to start playback...", ephemeral=True)
         loopthingy = 0
         while loopthingy == 0:
             devices = sp.devices()
@@ -287,13 +245,17 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
                     except Exception as e:
                         print(e)
                         pass
-
+    elif interaction.guild.voice_client.channel.id != interaction.user.voice.channel.id:
+        await interaction.response.send_message("you're in the wrong vc, or the bot is playing in another server.", ephemeral=True)
+        return
+    else:
+        await interaction.response.send_message("processing...")
     try:
         if play_type.lower() == "album":
             # Search for album
             results = sp.search(query, limit=1, type='album')
             if not results['albums']['items']:
-                await interaction.response.edit_message("No albums found!")
+                await interaction.edit_original_response("no albums found :(")
                 return
 
             album = results['albums']['items'][0]
@@ -304,15 +266,15 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
             track_uris = [track['uri'] for track in album_tracks['items']]
             
             if not track_uris:
-                await interaction.response.edit_message("No tracks found in album!")
+                await interaction.edit_original_response("No tracks found in album!")
                 return
 
             if await is_spotify_playing():
                 # Add all tracks to queue
                 for uri in track_uris:
                     sp.add_to_queue(uri)
-                await interaction.response.edit_message(
-                    f"Added album to queue: {album['name']} by {album['artists'][0]['name']}\n"
+                await interaction.edit_original_response(
+                    f"Added album to queue: {album['name']} by {album['artists'][0]['name']}\n" +
                     f"({len(track_uris)} tracks)"
                 )
             else:
@@ -320,8 +282,8 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
                 sp.start_playback(uris=[track_uris[0]])
                 for uri in track_uris[1:]:
                     sp.add_to_queue(uri)
-                await interaction.response.edit_message(
-                    f"Now playing album: {album['name']} by {album['artists'][0]['name']}\n"
+                await interaction.edit_original_response(
+                    f"Now playing album: {album['name']} by {album['artists'][0]['name']}\n" +
                     f"({len(track_uris)} tracks)"
                 )
 
@@ -329,7 +291,7 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
             # Search for the track
             results = sp.search(query, limit=1, type='track')
             if not results['tracks']['items']:
-                await interaction.response.edit_message("No tracks found!")
+                await interaction.edit_original_response(content="no tracks found :(")
                 return
 
             track = results['tracks']['items'][0]
@@ -340,54 +302,63 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
             if await is_spotify_playing():
                 # Add to queue
                 sp.add_to_queue(track_uri)
-                await interaction.response.edit_message(f"Added to queue: {track_name} by {artist_name}")
+                await interaction.edit_original_response(content=f"added {track_name} by {artist_name} to the queue.")
             else:
                 # Start playback
                 sp.start_playback(uris=[track_uri])
-                await interaction.response.edit_message(f"Now playing: {track_name} by {artist_name}")
+                await interaction.edit_original_response(content=f"started playing: {track_name} by {artist_name}")
 
     except Exception as e:
         print(e)
-        await interaction.response.edit_message(f"Error playing or queuing: {str(e)}")
+        await interaction.edit_original_response(f"Error playing or queuing: {str(e)}")
 
 
 @tree.command(name="pause", description="Pause Spotify playback", )
 async def pause(interaction: discord.Interaction):
+    if not interaction.user.voice:
+        await interaction.response.send_message("brotha join a vc first", ephemeral=True)
+        return
+    if interaction.guild.voice_client.channel.id != interaction.user.voice.channel.id:
+        await interaction.response.send_message("you're in the wrong vc, or the bot is playing in another server.", ephemeral=True)
+        return
     if interaction.guild.voice_client:
         # Clean up librespot process
         if interaction.guild.voice_client.source:
             interaction.guild.voice_client.source.cleanup()
         await interaction.guild.voice_client.disconnect()
-        await interaction.response.send_message("Paused, use /resume to start again.", ephemeral=True)
+        await interaction.response.send_message("paused spotify, use /resume to start from where ya left off.", ephemeral=True)
     else:
-        await interaction.response.send_message("I'm not in a voice channel.", ephemeral=True)
+        await interaction.response.send_message("brotha i'm not in a vc.", ephemeral=True)
 
 
 @tree.command(name="resume", description="Resume Spotify playback", )
 async def resume(interaction: discord.Interaction):
     if not interaction.user.voice:
-        await interaction.response.send_message("You're not in a voice channel!", ephemeral=True)
+        await interaction.response.send_message("brotha join a vc first", ephemeral=True)
         return
-
+    if interaction.guild.voice_client:
+        await interaction.response.send_message("brotha i'm in the vc already", ephemeral=True)
+        return
+    
     channel = interaction.user.voice.channel
     vc = await channel.connect()
 
     librespot = LibrespotAudio()
     await librespot.start()
     # the other audio handler, might work better? idfk tho
-    source = discord.FFmpegPCMAudio(
-        librespot,
-        pipe=True,
-        before_options='-rtbufsize 150000 -f s16le -ar 48000 -ac 2',  # 176400 = 44100 * 2 * 2 (1 second of s16 stereo at 44.1kHz)
-        options='-vn -vbr 0 -bufsize 150000'
-    )
-    #source = discord.PCMAudio(
-    #    librespot
+    #source = discord.FFmpegPCMAudio(
+    #    librespot,
+    #    pipe=True,
+    #    before_options='-rtbufsize 150000 -f s16le -ar 48000 -ac 2',  # 176400 = 44100 * 2 * 2 (1 second of s16 stereo at 44.1kHz)
+    #    options='-vn -vbr 0 -bufsize 150000'
     #)
+    source = discord.PCMAudio(
+        librespot
+    )
     vc.play(source)
     asyncio.create_task(monitor_playback_and_disconnect(vc))
     
-    await interaction.response.send_message("Joined the channel, trying to resume playback...")
+    await interaction.response.send_message("joined the vc, trying to tell spotify to resume playback..", ephemeral=True)
     loopthingy = 0
     while loopthingy == 0:
         devices = sp.devices()
@@ -405,13 +376,13 @@ async def resume(interaction: discord.Interaction):
 @tree.command(name="search", description="Search for a song on Spotify", )
 async def search(interaction: discord.Interaction, query: str):
     if not sp:
-        await interaction.response.send_message("Spotify is not authenticated. Please check the console for setup instructions.", ephemeral=True)
+        await interaction.response.send_message("the bot owner fucked up, please dm notquitek3t and tell em to reconnect Spotify.", ephemeral=True)
         return
 
     try:
         results = sp.search(query, limit=5, type='track')
         if not results['tracks']['items']:
-            await interaction.response.send_message("No tracks found!", ephemeral=True)
+            await interaction.response.send_message("no tracks found :(", ephemeral=True)
             return
 
         # Create a formatted list of results
@@ -429,11 +400,20 @@ async def search(interaction: discord.Interaction, query: str):
 @tree.command(name="skip", description="Skip to the next song on Spotify", )
 async def skip(interaction: discord.Interaction):
     if not sp:
-        await interaction.response.send_message("Spotify is not authenticated. Please check the console for setup instructions.", ephemeral=True)
+        await interaction.response.send_message("the bot owner fucked up, please dm notquitek3t and tell em to reconnect Spotify.", ephemeral=True)
+        return
+    if not interaction.user.voice:
+        await interaction.response.send_message("brotha join a vc first", ephemeral=True)
+        return
+    if not interaction.guild.voice_client:
+        await interaction.response.send_message("brotha i'm not even in the vc, use /resume or /play first.", ephemeral=True)
+        return
+    if interaction.guild.voice_client.channel.id != interaction.user.voice.channel.id:
+        await interaction.response.send_message("you're in the wrong vc, or the bot is playing in another server.", ephemeral=True)
         return
     try:
         sp.next_track()
-        await interaction.response.send_message("Skipped to the next track.")
+        await interaction.response.send_message("skipped to the next track, pls wait a few seconds for the buffer to catch up.")
     except Exception as e:
         await interaction.response.send_message(f"Error skipping track: {str(e)}", ephemeral=True)
 
@@ -441,11 +421,20 @@ async def skip(interaction: discord.Interaction):
 @tree.command(name="previous", description="Go to the previous song on Spotify", )
 async def previous(interaction: discord.Interaction):
     if not sp:
-        await interaction.response.send_message("Spotify is not authenticated. Please check the console for setup instructions.", ephemeral=True)
+        await interaction.response.send_message("the bot owner fucked up, please dm notquitek3t and tell em to reconnect Spotify.", ephemeral=True)
+        return
+    if not interaction.user.voice:
+        await interaction.response.send_message("brotha join a vc first", ephemeral=True)
+        return
+    if not interaction.guild.voice_client:
+        await interaction.response.send_message("brotha i'm not even in the vc, use /resume or /play first.", ephemeral=True)
+        return
+    if interaction.guild.voice_client.channel.id != interaction.user.voice.channel.id:
+        await interaction.response.send_message("you're in the wrong vc, or the bot is playing in another server.", ephemeral=True)
         return
     try:
         sp.previous_track()
-        await interaction.response.send_message("Went to the previous track.")
+        await interaction.response.send_message("went to the previous track, pls wait a few seconds for the buffer to catch up.")
     except Exception as e:
         await interaction.response.send_message(f"Error going to previous track: {str(e)}", ephemeral=True)
 
@@ -453,7 +442,16 @@ async def previous(interaction: discord.Interaction):
 @tree.command(name="radio", description="Start a Spotify radio based on a track or artist", )
 async def radio(interaction: discord.Interaction, query: str):
     if not sp:
-        await interaction.response.send_message("Spotify is not authenticated. Please check the console for setup instructions.", ephemeral=True)
+        await interaction.response.send_message("the bot owner fucked up, please dm notquitek3t and tell em to reconnect Spotify.", ephemeral=True)
+        return
+    if not interaction.user.voice:
+        await interaction.response.send_message("brotha join a vc first", ephemeral=True)
+        return
+    if not interaction.guild.voice_client:
+        await interaction.response.send_message("brotha i'm not even in the vc, use /resume or /play first.", ephemeral=True)
+        return
+    elif interaction.guild.voice_client.channel.id != interaction.user.voice.channel.id:
+        await interaction.response.send_message("you're in the wrong vc, or the bot is playing in another server.", ephemeral=True)
         return
     try:
         # Try to find a track or artist
@@ -465,7 +463,7 @@ async def radio(interaction: discord.Interaction, query: str):
         elif results['artists']['items']:
             seed_artists.append(results['artists']['items'][0]['id'])
         else:
-            await interaction.response.send_message("No matching track or artist found for radio.", ephemeral=True)
+            await interaction.response.send_message("no matching track or artist found for radio :(", ephemeral=True)
             return
         # Get recommendations
         recs = sp.recommendations(seed_tracks=seed_tracks, seed_artists=seed_artists, limit=10)
@@ -487,9 +485,17 @@ async def radio(interaction: discord.Interaction, query: str):
 @tree.command(name="stop", description="Stop playback and clear the queue", )
 async def stop(interaction: discord.Interaction):
     if not sp:
-        await interaction.response.send_message("Spotify is not authenticated. Please check the console for setup instructions.", ephemeral=True)
+        await interaction.response.send_message("the bot owner fucked up, please dm notquitek3t and tell em to reconnect Spotify.", ephemeral=True)
         return
-
+    if not interaction.user.voice:
+        await interaction.response.send_message("brotha join a vc first", ephemeral=True)
+        return
+    if not interaction.guild.voice_client:
+        await interaction.response.send_message("brotha i'm not even in the vc, use /resume or /play first.", ephemeral=True)
+        return
+    elif interaction.guild.voice_client.channel.id != interaction.user.voice.channel.id:
+        await interaction.response.send_message("you're in the wrong vc, or the bot is playing in another server.", ephemeral=True)
+        return
     try:
         # Stop playback
         sp.pause_playback()
@@ -499,7 +505,7 @@ async def stop(interaction: discord.Interaction):
         # so we start a new empty queue to effectively clear it
         sp.start_playback(uris=[])
         
-        await interaction.response.send_message("Stopped playback and cleared the queue.")
+        await interaction.response.send_message("cleared the queue")
     except Exception as e:
         await interaction.response.send_message(f"Error stopping playback: {str(e)}", ephemeral=True)
 
