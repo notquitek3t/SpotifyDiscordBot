@@ -261,7 +261,7 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
         vc.play(source)
         asyncio.create_task(monitor_playback_and_disconnect(vc))
 
-        await interaction.response.send_message("joined the vc, trying to tell spotify to start playback...", ephemeral=True)
+        await interaction.response.send_message("firing up librespot...", ephemeral=True)
         loopthingy = 0
         while loopthingy == 0:
             devices = sp.devices()
@@ -279,7 +279,7 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
         await interaction.response.send_message("you're in the wrong vc, or the bot is playing in another server.", ephemeral=True)
         return
     else:
-        await interaction.response.send_message("processing...", ephemeral=True)
+        await interaction.response.send_message("searching for the requested content...", ephemeral=True)
     try:
         if play_type.lower() == "album":
             # Search for album
@@ -373,7 +373,7 @@ async def pause(interaction: discord.Interaction):
         queue = get_queue()
         if queue != None:
             await interaction.response.send_message(f"""Queue (first song is currently playing):
-{yaml.dump(queue)}""")
+{yaml.dump(queue)}""", ephemeral=True)
         else:
             await interaction.response.send_message(f"seems like the queue is empty, or the spotify library had an issue.", ephemeral=True)
     else:
@@ -410,7 +410,7 @@ async def resume(interaction: discord.Interaction):
     vc.play(source)
     asyncio.create_task(monitor_playback_and_disconnect(vc))
     
-    await interaction.response.send_message("joined the vc, trying to tell spotify to resume playback..", ephemeral=True)
+    await interaction.response.send_message("firing up librespot and requesting spotify to start playback..", ephemeral=True)
     loopthingy = 0
     while loopthingy == 0:
         devices = sp.devices()
@@ -421,8 +421,10 @@ async def resume(interaction: discord.Interaction):
                     sp.transfer_playback(device_id=d['id'], force_play=True)
                     loopthingy = 1
                     await asyncio.sleep(3)
+                    await interaction.response.send_message("spotify seems to be playing now, if not, use /shutdown and try again.", ephemeral=True)
                 except Exception as e:
                     print(e)
+                    await interaction.response.send_message(f"an error occurred{e}, try using /shutdown and then using /play again after 10 seconds.", ephemeral=True)
                     pass
 
 @tree.command(name="search", description="Search for a song on Spotify", )
@@ -583,12 +585,11 @@ async def shutdown_bot():
     await bot.close()
 
 
-@tree.command(name="shutdown", description="Shutdown the bot (please don't abuse lol)")
+@tree.command(name="shutdown", description="Force the bot to restart (to fix a bug), please don't abuse this command.")
 async def shutdown(interaction: discord.Interaction):
     #if str(interaction.user.id) != os.getenv("OWNER_ID"):
     #    await interaction.response.send_message("You're not authorized to shut me down.", ephemeral=True)
     #    return
-
     await interaction.response.send_message("Shutting down...", ephemeral=True)
     await shutdown_bot()
 
