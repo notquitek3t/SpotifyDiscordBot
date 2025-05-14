@@ -529,7 +529,7 @@ async def radio(interaction: discord.Interaction, query: str):
         for track in recs['tracks'][1:]:
             sp.add_to_queue(track['uri'])
         track_names = [f"{t['name']} by {t['artists'][0]['name']}" for t in recs['tracks']]
-        await interaction.response.send_message(f"Started radio!\nQueued:\n" + "\n".join(track_names))
+        await interaction.response.send_message(f"Started radio!\nQueued:\n" + "\n".join(track_names), ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f"Error starting radio: {str(e)}", ephemeral=True)
 
