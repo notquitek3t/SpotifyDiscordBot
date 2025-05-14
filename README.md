@@ -23,3 +23,8 @@ services:
 ```
 
 made with love by notquitek3t, enjoy :3
+
+## Donations (since people have asked)
+I'd greatly appreciate donations, but I don't want people to feel forced into it.
+
+If you're still interested, contact me on discord at `notquitek3t` to discuss options.
