@@ -421,10 +421,10 @@ async def resume(interaction: discord.Interaction):
                     sp.transfer_playback(device_id=d['id'], force_play=True)
                     loopthingy = 1
                     await asyncio.sleep(3)
-                    await interaction.response.send_message("spotify seems to be playing now, if not, use /shutdown and try again.", ephemeral=True)
+                    await interaction.edit_original_response("spotify seems to be playing now, if not, use /shutdown and try again.", ephemeral=True)
                 except Exception as e:
                     print(e)
-                    await interaction.response.send_message(f"an error occurred{e}, try using /shutdown and then using /play again after 10 seconds.", ephemeral=True)
+                    await interaction.edit_original_response(f"an error occurred{e}, try using /shutdown and then using /play again after 10 seconds.", ephemeral=True)
                     pass
 
 @tree.command(name="search", description="Search for a song on Spotify", )
