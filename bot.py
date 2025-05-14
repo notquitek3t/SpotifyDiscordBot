@@ -9,6 +9,7 @@ from spotipy.oauth2 import SpotifyOAuth
 from dotenv import load_dotenv
 import numpy as np
 from scipy import signal
+import yaml
 
 # Load environment variables
 load_dotenv()
@@ -22,6 +23,24 @@ SPOTIFY_REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'http://localhost:8888/
 # Initialize Spotify client with OAuth
 sp = None
 librespot_process = None
+def get_queue():
+    """grabs the now playing song, and the next 10 tracks if possible, returns None if there's nothing playing."""
+    try:
+        queue = sp.queue()
+        tracks = []
+        index = 0
+        nowplaying = queue['currently_playing']
+        tracks.append(f"{nowplaying['artists'][0]['name']} - {nowplaying['name']}")
+        for i in queue['queue']:
+          if f"{i['artists'][0]['name']} - {i['name']}" == tracks[0]:
+              break
+          tracks.append(f"{i['artists'][0]['name']} - {i['name']}")
+          index += 1
+          if index > 9:
+            break
+        return tracks
+    except:
+        return None
 
 def setup_spotify():
     global sp
@@ -172,9 +191,11 @@ async def monitor_playback_and_disconnect(vc: discord.VoiceClient, check_interva
                 if vc.source:
                     vc.source.cleanup()
                 await vc.disconnect()
+                await shutdown_bot()
                 break
         except Exception as e:
             print(f"Error in playback monitor: {e}")
+            await shutdown_bot()
             break
 
 
@@ -189,8 +210,10 @@ async def leave(interaction: discord.Interaction):
             interaction.guild.voice_client.source.cleanup()
         await interaction.guild.voice_client.disconnect()
         await interaction.response.send_message("Disconnected.", ephemeral=True)
+        await shutdown_bot()
     else:
         await interaction.response.send_message("I'm not in a voice channel.", ephemeral=True)
+        await shutdown_bot()
 
 async def is_spotify_playing():
     """
@@ -338,6 +361,21 @@ async def pause(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("brotha i'm not in a vc.", ephemeral=True)
 
+@tree.command(name="queue", description="Sends what's up next and what's playing right now in the chat", )
+async def pause(interaction: discord.Interaction):
+    if not interaction.user.voice:
+        await interaction.response.send_message("brotha join a vc first", ephemeral=True)
+        return
+    if interaction.guild.voice_client.channel.id != interaction.user.voice.channel.id:
+        await interaction.response.send_message("you're in the wrong vc, or the bot is playing in another server.", ephemeral=True)
+        return
+    if interaction.guild.voice_client:
+        queue = get_queue()
+        if queue != None:
+            await interaction.response.send_message(f"""Queue (first song is currently playing):
+{yaml.dump(queue)}""")
+    else:
+        await interaction.response.send_message("brotha i'm not in a vc.", ephemeral=True)
 
 @tree.command(name="resume", description="Resume Spotify playback", )
 async def resume(interaction: discord.Interaction):
@@ -363,7 +401,7 @@ async def resume(interaction: discord.Interaction):
     #    pipe=True,
     #    before_options='-rtbufsize 150000 -f s16le -ar 48000 -ac 2',  # 176400 = 44100 * 2 * 2 (1 second of s16 stereo at 44.1kHz)
     #    options='-vn -vbr 0 -bufsize 150000'
-    #)
+    #) q
     source = discord.PCMAudio(
         librespot
     )
@@ -521,6 +559,36 @@ async def stop(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"Error stopping playback: {str(e)}", ephemeral=True)
 
+async def shutdown_bot():
+    print("Shutting down bot...")
+
+    # Terminate any librespot processes from active voice clients
+    for vc in bot.voice_clients:
+        if vc.is_connected():
+            if vc.source:
+                vc.source.cleanup()
+            await vc.disconnect()
+
+    # Optionally, stop playback on Spotify (just in case)
+    try:
+        if sp:
+            sp.pause_playback()
+    except Exception as e:
+        print(f"Failed to pause playback: {e}")
+
+    # Stop the bot gracefully
+    os.system("pkill librespot")
+    await bot.close()
+
+
+@tree.command(name="shutdown", description="Shutdown the bot (please don't abuse lol)")
+async def shutdown(interaction: discord.Interaction):
+    #if str(interaction.user.id) != os.getenv("OWNER_ID"):
+    #    await interaction.response.send_message("You're not authorized to shut me down.", ephemeral=True)
+    #    return
+
+    await interaction.response.send_message("Shutting down...", ephemeral=True)
+    await shutdown_bot()
 
 @bot.event
 async def on_ready():
@@ -528,4 +596,3 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
 
 bot.run(TOKEN)
-
