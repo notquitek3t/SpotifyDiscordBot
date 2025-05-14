@@ -374,6 +374,8 @@ async def pause(interaction: discord.Interaction):
         if queue != None:
             await interaction.response.send_message(f"""Queue (first song is currently playing):
 {yaml.dump(queue)}""")
+        else:
+            await interaction.response.send_message(f"seems like the queue is empty, or the spotify library had an issue.", ephemeral=True)
     else:
         await interaction.response.send_message("brotha i'm not in a vc.", ephemeral=True)
 
@@ -590,9 +592,12 @@ async def shutdown(interaction: discord.Interaction):
     await interaction.response.send_message("Shutting down...", ephemeral=True)
     await shutdown_bot()
 
+
+
 @bot.event
 async def on_ready():
     await tree.sync()
     print(f"Logged in as {bot.user}")
 
 bot.run(TOKEN)
+
