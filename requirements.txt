@@ -4,3 +4,4 @@ spotipy
 numpy
 scipy
 dotenv
+yaml
