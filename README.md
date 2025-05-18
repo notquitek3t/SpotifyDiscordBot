@@ -20,6 +20,7 @@ services:
       - SPOTIFY_CLIENT_ID=
       - SPOTIFY_CLIENT_SECRET=
       - SPOTIFY_REDIRECT_URI=
+      - BOT_ADMINS=00000,00001 # Comma separated list of user ids of who can override /skip, /pause, and /shutdown
 ```
 
 made with love by notquitek3t, enjoy :3
