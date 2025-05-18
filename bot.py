@@ -16,10 +16,21 @@ load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 
+# Get admin list from environment variable
+admins = [int(admin_id.strip()) for admin_id in os.getenv('BOT_ADMINS', '').split(',') if admin_id.strip()]
+
+# Initialize counter variables
+personpausecounter = 0
+personskipcounter = 0
+personshutdowncounter = 0
+lastperson = None
+
 # Spotify credentials
 SPOTIFY_CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
 SPOTIFY_CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
 SPOTIFY_REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'http://localhost:8888/callback')
+
+
 # Initialize Spotify client with OAuth
 sp = None
 librespot_process = None
@@ -32,7 +43,7 @@ def get_queue():
         nowplaying = queue['currently_playing']
         tracks.append(f"{nowplaying['artists'][0]['name']} - {nowplaying['name']}")
         for i in queue['queue']:
-          if f"{i['artists'][0]['name']} - {i['name']}" == tracks[0]:
+          if f"{i['artists'][0]['name']} - {i['name']}" == tracks[-1]:
               break
           tracks.append(f"{i['artists'][0]['name']} - {i['name']}")
           index += 1
@@ -49,7 +60,7 @@ def setup_spotify():
             client_id=SPOTIFY_CLIENT_ID,
             client_secret=SPOTIFY_CLIENT_SECRET,
             redirect_uri=SPOTIFY_REDIRECT_URI,
-            scope='user-modify-playback-state user-read-playback-state user-read-currently-playing',
+            scope='user-modify-playback-state user-read-playback-state user-read-currently-playing user-library-modify',
             cache_path='.spotify_cache',
             open_browser=False
         ))
@@ -228,6 +239,7 @@ async def is_spotify_playing():
         print(f"Error checking Spotify playback status: {e}")
         return False
 
+
 @tree.command(name="play", description="Play a song or album on Spotify", )
 @app_commands.describe(
     query="Name of the track or album to play",
@@ -248,13 +260,6 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
 
         librespot = LibrespotAudio()
         await librespot.start()
-        # the other audio handler, might work better? idfk tho
-        #source = discord.FFmpegPCMAudio(
-        #    librespot,
-        #    pipe=True,
-        #    before_options='-rtbufsize 150000 -f s16le -ar 48000 -ac 2',  # 176400 = 44100 * 2 * 2 (1 second of s16 stereo at 44.1kHz)
-        #    options='-vn -vbr 0 -bufsize 150000'
-        #)
         source = discord.PCMAudio(
             librespot
         )
@@ -285,7 +290,7 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
             # Search for album
             results = sp.search(query, limit=1, type='album')
             if not results['albums']['items']:
-                await interaction.edit_original_response("no albums found :(")
+                await interaction.edit_original_response(content="no albums found :(")
                 return
 
             album = results['albums']['items'][0]
@@ -294,28 +299,33 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
             # Get all tracks from the album
             album_tracks = sp.album_tracks(album['id'])
             track_uris = [track['uri'] for track in album_tracks['items']]
+            track_ids = [track['id'] for track in album_tracks['items']]
             
             if not track_uris:
-                await interaction.edit_original_response("No tracks found in album!")
+                await interaction.edit_original_response(content="No tracks found in album!")
                 return
+
+            # Add all tracks to liked songs
+            try:
+                # Add tracks in chunks of 50 (Spotify API limit)
+                chunk_size = 50
+                for i in range(0, len(track_ids), chunk_size):
+                    chunk = track_ids[i:i + chunk_size]
+                    sp.current_user_saved_tracks_add(tracks=chunk)
+            except Exception as e:
+                print(f"Error adding album tracks to liked songs: {e}")
 
             if await is_spotify_playing():
                 # Add all tracks to queue
                 for uri in track_uris:
                     sp.add_to_queue(uri)
-                await interaction.edit_original_response(
-                    f"Added album to queue: {album['name']} by {album['artists'][0]['name']}\n" +
-                    f"({len(track_uris)} tracks)"
-                )
+                await interaction.edit_original_response(content=f"Added album to queue: {album['name']} by {album['artists'][0]['name']}\n({len(track_uris)} tracks)")
             else:
                 # Start playback with first track and queue the rest
                 sp.start_playback(uris=[track_uris[0]])
                 for uri in track_uris[1:]:
                     sp.add_to_queue(uri)
-                await interaction.edit_original_response(
-                    f"Now playing album: {album['name']} by {album['artists'][0]['name']}\n" +
-                    f"({len(track_uris)} tracks)"
-                )
+                await interaction.edit_original_response(content=f"Now playing album: {album['name']} by {album['artists'][0]['name']}\n({len(track_uris)} tracks)")
 
         else:  # Default to track
             # Search for the track
@@ -329,6 +339,12 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
             track_name = track['name']
             artist_name = track['artists'][0]['name']
 
+            # Add track to liked songs
+            try:
+                sp.current_user_saved_tracks_add(tracks=[track['id']])
+            except Exception as e:
+                print(f"Error adding track to liked songs: {e}")
+
             if await is_spotify_playing():
                 # Add to queue
                 sp.add_to_queue(track_uri)
@@ -341,7 +357,7 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
 
     except Exception as e:
         print(e)
-        await interaction.edit_original_response(f"Error playing or queuing: {str(e)}")
+        await interaction.edit_original_response(content=f"Error playing or queuing: {str(e)}")
 
 
 @tree.command(name="pause", description="Pause Spotify playback", )
@@ -353,16 +369,35 @@ async def pause(interaction: discord.Interaction):
         await interaction.response.send_message("you're in the wrong vc, or the bot is playing in another server.", ephemeral=True)
         return
     if interaction.guild.voice_client:
+
+        match personpausecounter:
+            case _ if interaction.user.id in admins:
+                personpausecounter = 0
+                await interaction.response.send_message("[admin override applied] pausing the bot, use /resume to keep playing the queue")
+            case _ if personpausecounter == 0:
+                personpausecounter += 1
+                lastperson = interaction.user.id
+                await interaction.response.send_message("voted to pause, but 1 more person needs to also run /pause.")
+                return
+            case _ if personshutdowncounter == 1 and lastperson != interaction.user.id:
+                personshutdowncounter = 0
+                lastperson = None
+                await interaction.response.send_message("pausing the bot, use /resume to keep playing the queue")
+            case _ if personshutdowncounter == 1 and lastperson == interaction.user.id:
+                await interaction.response.send_message("the 2nd /pause needs to be ran by someone else :V")
+                return
+
         # Clean up librespot process
         if interaction.guild.voice_client.source:
             interaction.guild.voice_client.source.cleanup()
         await interaction.guild.voice_client.disconnect()
         await interaction.response.send_message("paused spotify, use /resume to start from where ya left off.", ephemeral=True)
+        await shutdown_bot()
     else:
         await interaction.response.send_message("brotha i'm not in a vc.", ephemeral=True)
 
 @tree.command(name="queue", description="Sends what's up next and what's playing right now in the chat", )
-async def pause(interaction: discord.Interaction):
+async def queue(interaction: discord.Interaction):
     if not interaction.user.voice:
         await interaction.response.send_message("brotha join a vc first", ephemeral=True)
         return
@@ -450,9 +485,9 @@ async def search(interaction: discord.Interaction, query: str):
     except Exception as e:
         await interaction.response.send_message(f"Error searching: {str(e)}", ephemeral=True)
 
-
 @tree.command(name="skip", description="Skip to the next song on Spotify", )
 async def skip(interaction: discord.Interaction):
+    # Basic verification, prevents shenanigans as is
     if not sp:
         await interaction.response.send_message("the bot owner fucked up, please dm notquitek3t and tell em to reconnect Spotify.", ephemeral=True)
         return
@@ -465,32 +500,28 @@ async def skip(interaction: discord.Interaction):
     if interaction.guild.voice_client.channel.id != interaction.user.voice.channel.id:
         await interaction.response.send_message("you're in the wrong vc, or the bot is playing in another server.", ephemeral=True)
         return
-    try:
-        sp.next_track()
-        await interaction.response.send_message("skipped to the next track, pls wait a few seconds for the buffer to catch up.")
-    except Exception as e:
-        await interaction.response.send_message(f"Error skipping track: {str(e)}", ephemeral=True)
 
-
-@tree.command(name="previous", description="Go to the previous song on Spotify", )
-async def previous(interaction: discord.Interaction):
-    if not sp:
-        await interaction.response.send_message("the bot owner fucked up, please dm notquitek3t and tell em to reconnect Spotify.", ephemeral=True)
-        return
-    if not interaction.user.voice:
-        await interaction.response.send_message("brotha join a vc first", ephemeral=True)
-        return
-    if not interaction.guild.voice_client:
-        await interaction.response.send_message("brotha i'm not even in the vc, use /resume or /play first.", ephemeral=True)
-        return
-    if interaction.guild.voice_client.channel.id != interaction.user.voice.channel.id:
-        await interaction.response.send_message("you're in the wrong vc, or the bot is playing in another server.", ephemeral=True)
-        return
-    try:
-        sp.previous_track()
-        await interaction.response.send_message("went to the previous track, pls wait a few seconds for the buffer to catch up.")
-    except Exception as e:
-        await interaction.response.send_message(f"Error going to previous track: {str(e)}", ephemeral=True)
+    # The two-party verification, to avoid trolls and other assorted people doing evil things
+    match personskipcounter:
+        case _ if interaction.user.id in admins:
+            personskipcounter = 0
+            sp.next_track()
+            await interaction.response.send_message("[admin override applied] skipped to the next track :3")
+            return
+        case _ if personskipcounter == 0:
+            personskipcounter += 1
+            lastperson = interaction.user.id
+            await interaction.response.send_message("voted to skip, but 1 more person needs to also run /skip.")
+            return
+        case _ if personskipcounter == 1 and lastperson != interaction.user.id:
+            personskipcounter = 0
+            lastperson = None
+            sp.next_track()
+            await interaction.response.send_message("skipped to the next track :3")
+            return
+        case _ if personskipcounter == 1 and lastperson == interaction.user.id:
+            await interaction.response.send_message("the 2nd /skip needs to be ran by someone else :V")
+            return
 
 
 @tree.command(name="radio", description="Start a Spotify radio based on a track or artist", )
@@ -535,6 +566,172 @@ async def radio(interaction: discord.Interaction, query: str):
     except Exception as e:
         await interaction.response.send_message(f"Error starting radio: {str(e)}", ephemeral=True)
 
+@tree.command(name="url", description="Play content directly from a Spotify URL (track, album, or playlist)", )
+@app_commands.describe(
+    url="Spotify URL to play (track, album, or playlist)"
+)
+async def url(interaction: discord.Interaction, url: str):
+    if not sp:
+        await interaction.response.send_message("the bot owner fucked up, please dm notquitek3t and tell em to reconnect Spotify.", ephemeral=True)
+        return
+    if not interaction.user.voice:
+        await interaction.response.send_message("brotha join a vc first", ephemeral=True)
+        return
+    if not interaction.guild.voice_client:
+        if await is_bot_in_any_voice_channel(bot):
+            await interaction.response.send_message("I'm already playing music in another server. I can't join multiple VCs.", ephemeral=True)
+            return
+
+        channel = interaction.user.voice.channel
+        vc = await channel.connect()
+
+        librespot = LibrespotAudio()
+        await librespot.start()
+        source = discord.PCMAudio(
+            librespot
+        )
+        vc.play(source)
+        asyncio.create_task(monitor_playback_and_disconnect(vc))
+
+        await interaction.response.send_message("firing up librespot...", ephemeral=True)
+        loopthingy = 0
+        while loopthingy == 0:
+            devices = sp.devices()
+            for d in devices['devices']:
+                print(f"{d['name']}: {d['id']}")
+                if d['name'] == "Discord Bot":
+                    try:
+                        sp.transfer_playback(device_id=d['id'], force_play=False)
+                        loopthingy = 1
+                        await asyncio.sleep(2)
+                    except Exception as e:
+                        print(e)
+                        pass
+    elif interaction.guild.voice_client.channel.id != interaction.user.voice.channel.id:
+        await interaction.response.send_message("you're in the wrong vc, or the bot is playing in another server.", ephemeral=True)
+        return
+    else:
+        await interaction.response.send_message("processing the url...", ephemeral=True)
+
+    try:
+        # Extract the type and ID from the URL
+        # Example URLs:
+        # https://open.spotify.com/track/1234567890
+        # https://open.spotify.com/album/1234567890
+        # https://open.spotify.com/playlist/1234567890
+        parts = url.split('/')
+        
+        if parts[2] != "open.spotify.com":
+            await interaction.edit_original_response(content="not a spotify url")
+            return            
+        
+        if len(parts) < 5:
+            await interaction.edit_original_response(content="invalid url passed")
+            return
+
+        content_type = parts[3]  # track, album, or playlist
+        content_id = parts[4].split('?')[0]  # Remove any query parameters
+
+        if content_type == 'track':
+            # Get track info
+            track = sp.track(content_id)
+            track_uri = track['uri']
+            
+            # Add track to liked songs
+            try:
+                sp.current_user_saved_tracks_add(tracks=[track['id']])
+            except Exception as e:
+                print(f"Error adding track to liked songs: {e}")
+
+            if await is_spotify_playing():
+                # Add to queue
+                sp.add_to_queue(track_uri)
+                await interaction.edit_original_response(content=f"added {track['name']} by {track['artists'][0]['name']} to the queue.")
+            else:
+                # Start playback
+                sp.start_playback(uris=[track_uri])
+                await interaction.edit_original_response(content=f"now playing: {track['name']} by {track['artists'][0]['name']}")
+
+        elif content_type == 'album':
+            # Get album tracks and play them
+            album = sp.album(content_id)
+            album_tracks = sp.album_tracks(content_id)
+            track_uris = [track['uri'] for track in album_tracks['items']]
+            track_ids = [track['id'] for track in album_tracks['items']]
+            
+            if not track_uris:
+                await interaction.edit_original_response(content="no tracks found in the album :(")
+                return
+
+            # Add all tracks to liked songs
+            try:
+                # Add tracks in chunks of 50 (Spotify API limit)
+                chunk_size = 50
+                for i in range(0, len(track_ids), chunk_size):
+                    chunk = track_ids[i:i + chunk_size]
+                    sp.current_user_saved_tracks_add(tracks=chunk)
+            except Exception as e:
+                print(f"Error adding album tracks to liked songs: {e}")
+
+            if await is_spotify_playing():
+                # Add all tracks to queue
+                for uri in track_uris:
+                    sp.add_to_queue(uri)
+                await interaction.edit_original_response(content=f"added album to queue: {album['name']} by {album['artists'][0]['name']}\n({len(track_uris)} tracks)")
+            else:
+                # Start playback with first track and queue the rest
+                sp.start_playback(uris=[track_uris[0]])
+                for uri in track_uris[1:]:
+                    sp.add_to_queue(uri)
+                await interaction.edit_original_response(content=f"now playing album: {album['name']} by {album['artists'][0]['name']}\n({len(track_uris)} tracks)")
+
+        elif content_type == 'playlist':
+            # Get playlist tracks and play them
+            playlist = sp.playlist(content_id)
+            playlist_tracks = []
+            
+            # Get all tracks from playlist (handling pagination)
+            results = sp.playlist_tracks(content_id)
+            playlist_tracks.extend(results['items'])
+            while results['next']:
+                results = sp.next(results)
+                playlist_tracks.extend(results['items'])
+            
+            track_uris = [item['track']['uri'] for item in playlist_tracks if item['track'] is not None]
+            track_ids = [item['track']['id'] for item in playlist_tracks if item['track'] is not None]
+            
+            if not track_uris:
+                await interaction.edit_original_response(content="no tracks found in playlist!")
+                return
+
+            # Add all tracks to liked songs
+            try:
+                # Add tracks in chunks of 50 (Spotify API limit)
+                chunk_size = 50
+                for i in range(0, len(track_ids), chunk_size):
+                    chunk = track_ids[i:i + chunk_size]
+                    sp.current_user_saved_tracks_add(tracks=chunk)
+            except Exception as e:
+                print(f"Error adding playlist tracks to liked songs: {e}")
+
+            if await is_spotify_playing():
+                # Add all tracks to queue
+                for uri in track_uris:
+                    sp.add_to_queue(uri)
+                await interaction.edit_original_response(content=f"added playlist to queue: {playlist['name']}\n({len(track_uris)} tracks)")
+            else:
+                # Start playback with first track and queue the rest
+                sp.start_playback(uris=[track_uris[0]])
+                for uri in track_uris[1:]:
+                    sp.add_to_queue(uri)
+                await interaction.edit_original_response(content=f"now playing playlist: {playlist['name']}\n({len(track_uris)} tracks)")
+
+        else:
+            await interaction.edit_original_response(content="unsupported content type, please only play albums, tracks, or playlists.")
+
+    except Exception as e:
+        print(f"Error playing from URL: {e}")
+        await interaction.edit_original_response(content=f"something went wrong :/ - {str(e)}")
 
 @tree.command(name="stop", description="Stop playback and clear the queue", )
 async def stop(interaction: discord.Interaction):
@@ -569,9 +766,12 @@ async def shutdown_bot():
     # Terminate any librespot processes from active voice clients
     for vc in bot.voice_clients:
         if vc.is_connected():
-            if vc.source:
-                vc.source.cleanup()
-            await vc.disconnect()
+            try:
+                if vc.source:
+                    vc.source.cleanup()
+                await vc.disconnect()
+            except Exception as e:
+                print(f"Error disconnecting voice client: {e}")
 
     # Optionally, stop playback on Spotify (just in case)
     try:
@@ -581,15 +781,35 @@ async def shutdown_bot():
         print(f"Failed to pause playback: {e}")
 
     # Stop the bot gracefully
-    os.system("pkill librespot")
-    await bot.close()
+    try:
+        os.system("pkill librespot")
+    except Exception as e:
+        print(f"Failed to kill librespot processes: {e}")
+
+    try:
+        await bot.close()
+    except Exception as e:
+        print(f"Failed to close bot: {e}")
 
 
 @tree.command(name="shutdown", description="Force the bot to restart (to fix a bug), please don't abuse this command.")
 async def shutdown(interaction: discord.Interaction):
-    #if str(interaction.user.id) != os.getenv("OWNER_ID"):
-    #    await interaction.response.send_message("You're not authorized to shut me down.", ephemeral=True)
-    #    return
+    match personshutdowncounter:
+        case _ if interaction.user.id in admins:
+            personshutdowncounter = 0
+            await interaction.response.send_message("[admin override applied] shutting the bot down")
+        case _ if personshutdowncounter == 0:
+            personshutdowncounter += 1
+            lastperson = interaction.user.id
+            await interaction.response.send_message("voted to shutdown, but 1 more person needs to also run /shutdown.")
+            return
+        case _ if personshutdowncounter == 1 and lastperson != interaction.user.id:
+            personshutdowncounter = 0
+            lastperson = None
+            await interaction.response.send_message("shutting the bot down")
+        case _ if personshutdowncounter == 1 and lastperson == interaction.user.id:
+            await interaction.response.send_message("the 2nd /shutdown needs to be ran by someone else :V")
+            return
     await interaction.response.send_message("Shutting down...", ephemeral=True)
     await shutdown_bot()
 
