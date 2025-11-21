@@ -7,8 +7,6 @@ import os
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from dotenv import load_dotenv
-import numpy as np
-from scipy import signal
 import yaml
 
 # Load environment variables
@@ -75,103 +73,105 @@ print(setup_spotify())
 
 class LibrespotAudio(discord.AudioSource):
     def __init__(self):
-        self.process = None
+        self.librespot_process = None
+        self.ffmpeg_process = None
         self._started = False
-        self._input_rate = 44100
-        self._output_rate = 48000
-        self._channels = 2
-        self._resample_ratio = self._output_rate / self._input_rate
 
     async def start(self):
         if self._started:
             return
 
         try:
-            self.process = subprocess.Popen(
+            # Start librespot process
+            self.librespot_process = subprocess.Popen(
                 ['librespot',
                 '--name', 'Discord Bot',
                 '--backend', 'pipe',
-                '--format', 'S16',
-                '--bitrate', '320',
-                '--cache', '/tmp/spotifycache',
-                '--system-cache', './cache'],
+                '--bitrate', '320'],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
+            
+            # Start ffmpeg process that reads from librespot and converts audio
+            # Input: s16le, 2 channels, 44100 Hz from librespot
+            # Output: f32le, 2 channels, 48000 Hz
+            self.ffmpeg_process = subprocess.Popen(
+                ['ffmpeg',
+                '-f', 's16le',
+                '-ac', '2',
+                '-ar', '44100',
+                '-re',
+                '-i', 'pipe:0',
+                '-map', '0:a:0',
+                '-c:a:0', 'pcm_s16le',
+                '-ar', '48000',
+                '-ac', '2',
+                '-f', 's16le',
+                '-'],
+                stdin=self.librespot_process.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            # Close the stdout of librespot in the parent process so that
+            # only ffmpeg reads from it
+            if self.librespot_process.stdout:
+                self.librespot_process.stdout.close()
+            
             self._started = True
-            print("Librespot started successfully")
+            print("Librespot and ffmpeg started successfully")
         except Exception as e:
-            print(f"Error starting librespot: {e}")
+            print(f"Error starting librespot/ffmpeg: {e}")
+            self.cleanup()
             raise
 
-    def _resample_audio(self, data):
-        # Convert bytes to numpy array of int16
-        audio_data = np.frombuffer(data, dtype=np.int16)
-        
-        # Ensure we have an even number of samples (for stereo)
-        if len(audio_data) % 2 != 0:
-            audio_data = audio_data[:-1]
-        
-        # Reshape to separate channels
-        audio_data = audio_data.reshape(-1, self._channels)
-        
-        # Resample each channel
-        resampled_channels = []
-        for channel in range(self._channels):
-            resampled = signal.resample_poly(
-                audio_data[:, channel],
-                up=self._output_rate,
-                down=self._input_rate
-            )
-            resampled_channels.append(resampled)
-        
-        # Combine channels back
-        resampled_audio = np.column_stack(resampled_channels)
-        
-        # Convert back to bytes
-        return resampled_audio.astype(np.int16).tobytes()
-
     def read(self, blocksize):
-        if not self.process or self.process.stdout is None:
-            return b'\x00' * (blocksize // 2 )
+        if not self.ffmpeg_process or self.ffmpeg_process.stdout is None:
+            return b'\x00' * blocksize
         
         try:
-            # Read enough data to get the desired output size after resampling
-            # Ensure we read a multiple of 4 bytes (2 bytes per sample * 2 channels)
-            input_size = int(blocksize * self._input_rate / self._output_rate)
-            input_size = (input_size // 4) * 4
-            
-            data = self.process.stdout.read(input_size)
+            # Read audio data from ffmpeg stdout
+            data = self.ffmpeg_process.stdout.read(blocksize)
             if not data:
-                return b'\x00\x00' * blocksize
+                # Return silence if no data
+                return b'\x00' * blocksize
             
-            # Ensure data length is a multiple of 4
-            if len(data) % 4 != 0:
-                data = data[:(len(data) // 4) * 4]
+            # If we got less data than requested, pad with silence
+            if len(data) < blocksize:
+                data += b'\x00' * (blocksize - len(data))
             
-            # Resample the audio
-            resampled_data = self._resample_audio(data)
-            
-            # Ensure we return exactly blocksize bytes
-            if len(resampled_data) > blocksize:
-                return resampled_data[:blocksize]
-            elif len(resampled_data) < blocksize:
-                return resampled_data + (b'\x00\x00' * (blocksize - len(resampled_data)))
-            return resampled_data
+            return data
             
         except Exception as e:
             print(f"Error reading audio: {e}")
-            return b'' * blocksize
+            return b'\x00' * blocksize
 
     def cleanup(self):
-        if self.process:
+        # Stop ffmpeg process first
+        if self.ffmpeg_process:
             try:
-                self.process.terminate()
-                self.process.wait(timeout=1)
+                self.ffmpeg_process.terminate()
+                self.ffmpeg_process.wait(timeout=1)
             except:
-                self.process.kill()
-            self.process = None
-            self._started = False
+                try:
+                    self.ffmpeg_process.kill()
+                except:
+                    pass
+            self.ffmpeg_process = None
+        
+        # Stop librespot process
+        if self.librespot_process:
+            try:
+                self.librespot_process.terminate()
+                self.librespot_process.wait(timeout=1)
+            except:
+                try:
+                    self.librespot_process.kill()
+                except:
+                    pass
+            self.librespot_process = None
+        
+        self._started = False
 
     def is_opus(self):
         return False
@@ -199,11 +199,11 @@ async def monitor_playback_and_disconnect(vc: discord.VoiceClient, check_interva
             playback = sp.current_playback()
             if not playback or not playback.get('is_playing'):
                 print("Spotify is not playing. Disconnecting from voice channel.")
-                if vc.source:
-                    vc.source.cleanup()
-                await vc.disconnect()
-                await shutdown_bot()
-                break
+                #if vc.source:
+                #    vc.source.cleanup()
+                #await vc.disconnect()
+                #await shutdown_bot()
+                #break
         except Exception as e:
             print(f"Error in playback monitor: {e}")
             await shutdown_bot()
@@ -221,10 +221,10 @@ async def leave(interaction: discord.Interaction):
             interaction.guild.voice_client.source.cleanup()
         await interaction.guild.voice_client.disconnect()
         await interaction.response.send_message("Disconnected.", ephemeral=True)
-        await shutdown_bot()
+        #await shutdown_bot()
     else:
         await interaction.response.send_message("I'm not in a voice channel.", ephemeral=True)
-        await shutdown_bot()
+        #await shutdown_bot()
 
 async def is_spotify_playing():
     """
@@ -267,19 +267,21 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
         asyncio.create_task(monitor_playback_and_disconnect(vc))
 
         await interaction.response.send_message("firing up librespot...", ephemeral=True)
-        loopthingy = 0
-        while loopthingy == 0:
+        device_found = False
+        while not device_found:
             devices = sp.devices()
             for d in devices['devices']:
                 print(f"{d['name']}: {d['id']}")
-                if d['name'] == "Discord Bot":
+                if "Discord Bot" in d['name']:
                     try:
                         sp.transfer_playback(device_id=d['id'], force_play=False)
-                        loopthingy = 1
+                        device_found = True
                         await asyncio.sleep(2)
                     except Exception as e:
                         print(e)
                         pass
+                else:
+                    await asyncio.sleep(2)
     elif interaction.guild.voice_client.channel.id != interaction.user.voice.channel.id:
         await interaction.response.send_message("you're in the wrong vc, or the bot is playing in another server.", ephemeral=True)
         return
@@ -323,6 +325,7 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
             else:
                 # Start playback with first track and queue the rest
                 sp.start_playback(uris=[track_uris[0]])
+                sp.volume(100)
                 for uri in track_uris[1:]:
                     sp.add_to_queue(uri)
                 await interaction.edit_original_response(content=f"Now playing album: {album['name']} by {album['artists'][0]['name']}\n({len(track_uris)} tracks)")
@@ -362,6 +365,7 @@ async def play(interaction: discord.Interaction, query: str, play_type: str = "t
 
 @tree.command(name="pause", description="Pause Spotify playback", )
 async def pause(interaction: discord.Interaction):
+    global personpausecounter, lastperson
     if not interaction.user.voice:
         await interaction.response.send_message("brotha join a vc first", ephemeral=True)
         return
@@ -379,11 +383,11 @@ async def pause(interaction: discord.Interaction):
                 lastperson = interaction.user.id
                 await interaction.response.send_message("voted to pause, but 1 more person needs to also run /pause.")
                 return
-            case _ if personshutdowncounter == 1 and lastperson != interaction.user.id:
-                personshutdowncounter = 0
+            case _ if personpausecounter == 1 and lastperson != interaction.user.id:
+                personpausecounter = 0
                 lastperson = None
                 await interaction.response.send_message("pausing the bot, use /resume to keep playing the queue")
-            case _ if personshutdowncounter == 1 and lastperson == interaction.user.id:
+            case _ if personpausecounter == 1 and lastperson == interaction.user.id:
                 await interaction.response.send_message("the 2nd /pause needs to be ran by someone else :V")
                 return
 
@@ -392,7 +396,7 @@ async def pause(interaction: discord.Interaction):
             interaction.guild.voice_client.source.cleanup()
         await interaction.guild.voice_client.disconnect()
         await interaction.response.send_message("paused spotify, use /resume to start from where ya left off.", ephemeral=True)
-        await shutdown_bot()
+        #await shutdown_bot()
     else:
         await interaction.response.send_message("brotha i'm not in a vc.", ephemeral=True)
 
@@ -446,15 +450,15 @@ async def resume(interaction: discord.Interaction):
     asyncio.create_task(monitor_playback_and_disconnect(vc))
     
     await interaction.response.send_message("firing up librespot and requesting spotify to start playback..", ephemeral=True)
-    loopthingy = 0
-    while loopthingy == 0:
+    device_found = False
+    while not device_found:
         devices = sp.devices()
         for d in devices['devices']:
             print(f"{d['name']}: {d['id']}")
             if d['name'] == "Discord Bot":
                 try:
                     sp.transfer_playback(device_id=d['id'], force_play=True)
-                    loopthingy = 1
+                    device_found = True
                     await asyncio.sleep(3)
                     await interaction.edit_original_response(content="spotify seems to be playing now, if not, use /shutdown and try again.")
                 except Exception as e:
@@ -502,6 +506,7 @@ async def skip(interaction: discord.Interaction):
         return
 
     # The two-party verification, to avoid trolls and other assorted people doing evil things
+    global personskipcounter, lastperson
     match personskipcounter:
         case _ if interaction.user.id in admins:
             personskipcounter = 0
@@ -594,19 +599,31 @@ async def url(interaction: discord.Interaction, url: str):
         asyncio.create_task(monitor_playback_and_disconnect(vc))
 
         await interaction.response.send_message("firing up librespot...", ephemeral=True)
-        loopthingy = 0
-        while loopthingy == 0:
+        device_found = False
+        await asyncio.sleep(2)
+        try:
+            sp.transfer_playback(device_id="3d66146a7408d60061ddebcd66f5cb098dcec1c8", force_play=True)
+            sp.volume(100)
+            device_found = True
+            await asyncio.sleep(2)
+        except Exception as e:
+            print(e)
+            pass
+        while not device_found:
             devices = sp.devices()
             for d in devices['devices']:
                 print(f"{d['name']}: {d['id']}")
                 if d['name'] == "Discord Bot":
                     try:
-                        sp.transfer_playback(device_id=d['id'], force_play=False)
-                        loopthingy = 1
+                        sp.transfer_playback(device_id=d['id'], force_play=True)
+                        sp.volume(100)
+                        device_found = True
                         await asyncio.sleep(2)
                     except Exception as e:
                         print(e)
                         pass
+
+
     elif interaction.guild.voice_client.channel.id != interaction.user.voice.channel.id:
         await interaction.response.send_message("you're in the wrong vc, or the bot is playing in another server.", ephemeral=True)
         return
@@ -794,6 +811,7 @@ async def shutdown_bot():
 
 @tree.command(name="shutdown", description="Force the bot to restart (to fix a bug), please don't abuse this command.")
 async def shutdown(interaction: discord.Interaction):
+    global personshutdowncounter, lastperson
     match personshutdowncounter:
         case _ if interaction.user.id in admins:
             personshutdowncounter = 0
